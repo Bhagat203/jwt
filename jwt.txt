@@ -1,0 +1,221 @@
+JWT - >JSON Web Token
+way transmit the info from one application to another its small self contained mostly used for authorizarion
+has 3 parts 
+      : Header {
+                 "alg":"Hs256", -->algorithm
+		 "typ":"JWT"
+		}
+      : Payload { -->info about user
+		 }
+      : Signature -->take encoded header and encoded payload and alg for signature
+
+Create a class for the security Config which extends WebSecurityConfigurerAdapter annotate it with :
+@Configuration
+@EnableWebSecurity  
+	@Autowired
+	private UserDetailsService detailsService;
+	@Autowired
+	private PasswordEncoder encoder;
+	
+	@Override
+	protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+		// TODO Auto-generated method stub
+		auth.userDetailsService(detailsService).passwordEncoder(encoder);
+	}
+
+	@Override
+	protected void configure(HttpSecurity http) throws Exception {
+		// TODO Auto-generated method stub
+		http.csrf().disable();//disable it so we can use jwt token
+		http.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS);
+		http.authorizeRequests().anyRequest().permitAll();
+		http.authorizeRequests().antMatchers(POST,"service/save/user/**").hasAnyAuthority("ROLE_MANAGER");
+		http.authorizeRequests().antMatchers(GET,"/service/**").hasAnyAuthority("ROLE_MANAGER","ROLE_EMPLOYEE");
+		http.addFilter(new CustomAuthenticationFilter());
+	}
+
+	@Bean
+	@Override
+	public AuthenticationManager authenticationManagerBean() throws Exception {
+		// TODO Auto-generated method stub
+		return super.authenticationManagerBean();
+	}
+
+Create a class extends UsernamePasswordAuthenticationFilter
+For filter creation of security
+@Overide two methods
+	@Override
+	public Authentication attemptAuthentication(HttpServletRequest request, HttpServletResponse response)
+			throws AuthenticationException {
+the request has a username and passward get that using the parameter
+then Create UsernamePasswordAuthenticationToken object which is authentication Token and which takes two pararter in construtor Username and password
+The Using AuthenticationManager referece authenticate it using authentication Token
+	private static int count=0;
+ 	@Autowired
+	private AuthenticationManager authenticationManager;
+	
+		// TODO Auto-generated method stub
+		String username = request.getParameter("username");
+		String password = request.getParameter("password"); 
+		UsernamePasswordAuthenticationToken authenticationToken =  new UsernamePasswordAuthenticationToken(username, password);
+		return authenticationManager.authenticate(authenticationToken);
+	}
+
+	@Override
+	protected void successfulAuthentication(HttpServletRequest request, HttpServletResponse response, FilterChain chain,
+			Authentication authResult) throws IOException, ServletException {
+		// TODO Auto-generated method stub
+		 
+	}	
+}
+authenticationManager -- > Bean is created using 
+	@Bean
+	@Override
+	public AuthenticationManager authenticationManagerBean() throws Exception {
+		// TODO Auto-generated method stub
+		return super.authenticationManagerBean();
+	}
+
+Where its a overriding 
+
+Security with JSON Wenb Token
+
+1. client sends a post request to appln for login
+2. If the credentials provided are correct then appln gives a JWT to client
+	JWT has client information and expiration date and lot more information 
+3. Once after this if they want to access other resoure client will send the same JWT back to appln and appln checks the jwt and also checks for permission of that jwt
+
+Refresh token is one token where the actual token is expired so tal when the actual token is date or time expired need not check and authenticate using the refresh token access can be provided
+	Tokens are geenerate during completion of login process 
+	@Override
+	protected void successfulAuthentication(HttpServletRequest request, HttpServletResponse response, FilterChain chain,
+			Authentication authentication) throws IOException, ServletException {
+		// TODO Auto-generated method stub
+		
+		User user =(User) authentication.getPrincipal();
+		Algorithm algorithm = Algorithm.HMAC256("secrect".getBytes());
+		String accesToken=JWT.create().withSubject(user.getUsername()).withExpiresAt(new Date(System.currentTimeMillis()+10*60*1000))
+		 .withIssuer(request.getRequestURI().toString())
+		 .withClaim("roles",user.getAuthorities().stream().map(GrantedAuthority::getAuthority).collect(Collectors.toList()))
+		 .sign(algorithm); 
+		String refresToken=JWT.create().withSubject(user.getUsername()).withExpiresAt(new Date(System.currentTimeMillis()+60*60*1000))
+				 .withIssuer(request.getRequestURI().toString())
+				 .sign(algorithm); 
+//		response.setHeader("access_token",accesToken);
+//		response.setHeader("refresh_token", refresToken);
+		Map<String, String> tokens = new HashMap<String, String>();
+		tokens.put("refreshToken", refresToken);
+		tokens.put("accessToken",accesToken);
+		response.setContentType(APPLICATION_JSON_VALUE);
+		new ObjectMapper().writeValue(response.getOutputStream(), tokens);
+	}
+To create a custom login we need to create a authentication filter object where it has a setFilterProcessUrl method where we can specify the url
+		CustomAuthenticationFilter  authenticationFilter= new CustomAuthenticationFilter(authenticationManagerBean());
+		authenticationFilter.setFilterProcessesUrl("/service/login");
+		http.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS);
+		http.authorizeRequests().antMatchers("/service/login/**").permitAll();
+
+Next Authentication Filter is done
+Now Authorization Filter needs to created 
+and For that create a class which extends OncePerRequestFilter -->this class intercepts the every request that comes into application
+ implement doFilterInternal all the 
+		if (request.getServletPath().equals("/service/login")||request.getServletPath().equals("/service/token/refresh")) {
+			filterChain.doFilter(request, response);
+		} else {
+			String authorizationHeader = request.getHeader(AUTHORIZATION);
+			if(authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
+				try {
+					String token = authorizationHeader.substring("Bearer ".length());
+					Algorithm algorithm = Algorithm.HMAC256("secret".getBytes());
+					JWTVerifier jwtVerifier= JWT.require(algorithm).build();
+					DecodedJWT decodedJWT = jwtVerifier.verify(token);
+					String username = decodedJWT.getSubject();
+					String [] roles=  decodedJWT.getClaim("roles").asArray(String.class);
+					Collection<SimpleGrantedAuthority> authorities = new ArrayList<SimpleGrantedAuthority>();
+					stream(roles).forEach(role->{
+						authorities.add(new SimpleGrantedAuthority(role));
+						
+					});
+					UsernamePasswordAuthenticationToken authenticationToken = new UsernamePasswordAuthenticationToken(username, null,authorities);
+					SecurityContextHolder.getContext().setAuthentication(authenticationToken);
+					filterChain.doFilter(request, response);
+				} catch (IllegalArgumentException | JWTVerificationException e) {
+					// TODO Auto-generated catch block
+					log.error("Error logging in : {} ", e.getMessage());
+					response.setHeader("error", e.getMessage());
+					response.setStatus(HttpStatus.FORBIDDEN.value());
+//					response.sendError(HttpStatus.FORBIDDEN.value());		
+					error.put("error", e.getMessage());
+					response.setContentType(APPLICATION_JSON_VALUE);
+					new ObjectMapper().writeValue(response.getOutputStream(), error);
+
+				}
+				catch (Exception e) {
+					// TODO: handle excepion
+					log.error("Error logging in : {} ", e.getMessage());
+					response.setHeader("error", e.getMessage());
+					response.setStatus(HttpStatus.FORBIDDEN.value());
+//					response.sendError(HttpStatus.FORBIDDEN.value());		
+					error.put("error", e.getMessage());
+					response.setContentType(APPLICATION_JSON_VALUE);
+					new ObjectMapper().writeValue(response.getOutputStream(), error);
+										
+				}
+				
+			}
+			else {
+				filterChain.doFilter(request, response);
+			}
+		}
+If Access Token is expired user can send refresh token and get new accces token
+for that you need do 
+	@GetMapping("/token/refresh")
+	public void refreshToken(HttpServletRequest request,HttpServletResponse response) throws StreamWriteException, DatabindException, IOException{
+		String authorizationHeader = request.getHeader(AUTHORIZATION);
+		if(authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
+			HashMap<String, String> error= new HashMap<String, String>();
+			try {
+				String refresh_token = authorizationHeader.substring("Bearer ".length());
+				Algorithm algorithm = Algorithm.HMAC256("secret".getBytes());
+				JWTVerifier jwtVerifier= JWT.require(algorithm).build();
+				DecodedJWT decodedJWT = jwtVerifier.verify(refresh_token);
+				String username = decodedJWT.getSubject();
+				AppUser user = service.getUser(username);
+				String accesToken=JWT.create().withSubject(user.getUsername()).withExpiresAt(new Date(System.currentTimeMillis()+10*60*1000))
+				 .withIssuer(request.getRequestURI().toString())
+				 .withClaim("roles",user.getRoles().stream().map(Role::getName).collect(Collectors.toList()))
+				 .sign(algorithm);  
+				Map<String, String> tokens = new HashMap<String, String>();
+				tokens.put("accessToken",accesToken);
+				response.setContentType(APPLICATION_JSON_VALUE);
+				new ObjectMapper().writeValue(response.getOutputStream(), tokens);
+			
+			} catch (IllegalArgumentException | JWTVerificationException e) {
+				// TODO Auto-generated catch block
+				log.error("Error logging in : {} ", e.getMessage());
+				response.setHeader("error", e.getMessage());
+				response.setStatus(HttpStatus.FORBIDDEN.value());
+//				response.sendError(HttpStatus.FORBIDDEN.value());		
+				error.put("error", e.getMessage());
+				response.setContentType(APPLICATION_JSON_VALUE);
+				new ObjectMapper().writeValue(response.getOutputStream(), error);
+
+			}
+			catch (Exception e) {
+				// TODO: handle excepion
+				log.error("Error logging in : {} ", e.getMessage());
+				response.setHeader("error", e.getMessage());
+				response.setStatus(HttpStatus.FORBIDDEN.value());
+//				response.sendError(HttpStatus.FORBIDDEN.value());		
+				error.put("error", e.getMessage());
+				response.setContentType(APPLICATION_JSON_VALUE);
+				new ObjectMapper().writeValue(response.getOutputStream(), error);
+									
+			}
+			
+		}
+		else {
+			throw new RuntimeException("Refresh token missing");
+		}
+		
+	}
